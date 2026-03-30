@@ -1,0 +1,23 @@
+# Environnements virtuels
+.venv/
+venv/
+
+# Outils locaux
+.local/
+
+# Cache Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Variables d'environnement
+.env
+
+# Fichiers système / éditeurs
+.DS_Store
+.vscode/
+
+# Fichiers locaux non nécessaires au dépôt
+5DVSCOPS - 2025-2026 - Projet - V1.0.pdf
