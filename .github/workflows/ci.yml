@@ -7,8 +7,68 @@ on:
       - master
   pull_request:
 
+# ==============================================================================
+# CONFIG ACTUELLE COMMENTEE — job unique (conservee en reference)
+# ==============================================================================
+# jobs:
+#   security-pipeline:
+#     runs-on: ubuntu-latest
+#
+#     steps:
+#       - name: Checkout repository
+#         uses: actions/checkout@v4
+#
+#       - name: Set up Python
+#         uses: actions/setup-python@v5
+#         with:
+#           python-version: "3.11"
+#
+#       - name: Install yamllint
+#         run: |
+#           python -m pip install --upgrade pip
+#           pip install yamllint
+#
+#       - name: Lint Kubernetes YAML
+#         run: yamllint k8s/deployment.yaml
+#
+#       - name: Install Conftest
+#         run: |
+#           CONFTEST_VERSION=0.67.1
+#           curl -L "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz" -o /tmp/conftest.tar.gz
+#           tar -xzf /tmp/conftest.tar.gz -C /tmp
+#           sudo mv /tmp/conftest /usr/local/bin/conftest
+#           sudo chmod +x /usr/local/bin/conftest
+#
+#       - name: Run Conftest policy checks
+#         run: conftest test k8s/deployment.yaml --policy policy
+#
+#       - name: Install Trivy
+#         run: |
+#           sudo apt-get update
+#           sudo apt-get install -y wget gnupg lsb-release
+#           wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | gpg --dearmor | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+#           echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" | sudo tee /etc/apt/sources.list.d/trivy.list
+#           sudo apt-get update
+#           sudo apt-get install -y trivy
+#
+#       - name: Run Trivy filesystem scan
+#         run: trivy fs --scanners vuln,secret,misconfig --exit-code 0 .
+#
+#       - name: Build Docker image
+#         run: docker build -t devsecops-demo:ci .
+#
+#       - name: Run Trivy image scan
+#         run: trivy image --scanners vuln,secret,misconfig --exit-code 0 devsecops-demo:ci
+
+# ==============================================================================
+# CONFIG DE BASE ACTIVE — pipeline avec differents jobs
+# Objectif phase 1 :
+# - montrer un pipeline qui detecte vraiment les problemes
+# - faire echouer certains jobs sur l'etat initial
+# ==============================================================================
 jobs:
-  security-pipeline:
+  lint:
+    name: Lint YAML
     runs-on: ubuntu-latest
 
     steps:
@@ -18,7 +78,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install yamllint
         run: |
@@ -27,6 +87,15 @@ jobs:
 
       - name: Lint Kubernetes YAML
         run: yamllint k8s/deployment.yaml
+
+  policy:
+    name: Policy Check (Conftest)
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Install Conftest
         run: |
@@ -39,6 +108,15 @@ jobs:
       - name: Run Conftest policy checks
         run: conftest test k8s/deployment.yaml --policy policy
 
+  scan-filesystem:
+    name: Scan Filesystem (Trivy)
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Install Trivy
         run: |
           sudo apt-get update
@@ -48,11 +126,60 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y trivy
 
-      - name: Run Trivy filesystem scan
-        run: trivy fs --scanners vuln,secret,misconfig --exit-code 0 .
+      - name: Run Trivy filesystem scan (full report)
+        run: trivy fs --scanners vuln,secret,misconfig .
+
+      - name: Fail on HIGH/CRITICAL misconfigurations
+        run: trivy fs --scanners misconfig --severity HIGH,CRITICAL --exit-code 1 .
+
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: [policy, scan-filesystem]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Build Docker image
         run: docker build -t devsecops-demo:ci .
 
-      - name: Run Trivy image scan
-        run: trivy image --scanners vuln,secret,misconfig --exit-code 0 devsecops-demo:ci
+      - name: Export Docker image
+        run: docker save devsecops-demo:ci -o /tmp/devsecops-demo.tar
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp/devsecops-demo.tar
+          retention-days: 1
+
+  scan-image:
+    name: Scan Docker Image (Trivy)
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+
+      - name: Load Docker image
+        run: docker load -i /tmp/devsecops-demo.tar
+
+      - name: Install Trivy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | gpg --dearmor | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install -y trivy
+
+      - name: Run Trivy image scan (full report)
+        run: trivy image --scanners vuln,secret,misconfig devsecops-demo:ci
+
+      - name: Fail on HIGH/CRITICAL vulnerabilities
+        run: trivy image --scanners vuln --severity HIGH,CRITICAL --exit-code 1 devsecops-demo:ci
