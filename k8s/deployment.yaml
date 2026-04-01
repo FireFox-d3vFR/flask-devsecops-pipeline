@@ -1,75 +1,8 @@
-# ======================================================================
-# CONFIG ACTUELLE COMMENTEE — manifeste Kubernetes durci
-# ======================================================================
-# apiVersion: apps/v1
-# kind: Deployment
-# metadata:
-#   name: devsecops-demo
-#   namespace: devsecops
-#   labels:
-#     app: devsecops-demo
-# spec:
-#   replicas: 1
-#   selector:
-#     matchLabels:
-#       app: devsecops-demo
-#   template:
-#     metadata:
-#       labels:
-#         app: devsecops-demo
-#     spec:
-#       securityContext:
-#         seccompProfile:
-#           type: RuntimeDefault
-#       containers:
-#         - name: devsecops-demo
-#           image: devsecops-demo:local
-#           imagePullPolicy: IfNotPresent
-#           securityContext:
-#             runAsNonRoot: true
-#             runAsUser: 10001
-#             runAsGroup: 10001
-#             allowPrivilegeEscalation: false
-#             readOnlyRootFilesystem: true
-#             capabilities:
-#               drop:
-#                 - ALL
-#           ports:
-#             - containerPort: 5000
-#           resources:
-#             requests:
-#               cpu: "100m"
-#               memory: "128Mi"
-#             limits:
-#               cpu: "200m"
-#               memory: "256Mi"
-# ---
-# apiVersion: v1
-# kind: Namespace
-# metadata:
-#   name: devsecops
-# ---
-# apiVersion: v1
-# kind: Service
-# metadata:
-#   name: devsecops-demo-service
-#   namespace: devsecops
-# spec:
-#   selector:
-#     app: devsecops-demo
-#   ports:
-#     - protocol: TCP
-#       port: 80
-#       targetPort: 5000
-#   type: ClusterIP
-
-# ======================================================================
-# CONFIG DE BASE ACTIVE — manifeste initial
-# ======================================================================
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: devsecops-demo
+  namespace: devsecops
   labels:
     app: devsecops-demo
 spec:
@@ -82,17 +15,42 @@ spec:
       labels:
         app: devsecops-demo
     spec:
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: devsecops-demo
           image: devsecops-demo:local
           imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
           ports:
             - containerPort: 5000
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: devsecops
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: devsecops-demo-service
+  namespace: devsecops
 spec:
   selector:
     app: devsecops-demo

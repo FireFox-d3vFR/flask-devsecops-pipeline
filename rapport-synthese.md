@@ -10,20 +10,27 @@ Le projet devait aussi inclure une règle de sécurité codifiée avec Conftest,
 
 Dépôt GitHub du projet : `https://github.com/FireFox-d3vFR/flask-devsecops-pipeline`
 
-Le pipeline a été exécuté avec succès dans GitHub Actions.  
-Les différentes étapes automatisées permettent de valider la configuration YAML, de contrôler une règle de sécurité Kubernetes, de scanner les dépendances et le système de fichiers avec Trivy, puis de construire et scanner l’image Docker.
+Le pipeline a été exécuté dans GitHub Actions avec une structure découpée en **5 jobs distincts**, offrant un rendu visuel clair de l'enchaînement et des dépendances entre étapes.  
+Lors du premier run avec la configuration initiale, plusieurs contrôles ont échoué, ce qui illustre l'intérêt du pipeline pour détecter des problèmes de sécurité réels.
 
-### 2.1 Capture - Vue générale du workflow GitHub Actions
+### 2.1 Capture - Vue générale du pipeline GitHub Actions
 
-![Vue générale du workflow GitHub Actions](assets/github-actions-overview.png)
+La capture ci-dessous montre le pipeline avec ses 5 jobs. Les jobs `Policy Check (Conftest)` et `Scan Filesystem (Trivy)` sont en échec, ce qui entraîne l'annulation des jobs `Build Docker Image` et `Scan Docker Image`.
 
-### 2.2 Capture - Détail du job security-pipeline
+![Vue générale du pipeline GitHub Actions](assets/github-action-pipeline.png)
 
-![Détail du job security-pipeline](assets/github-actions-job-details.png)
+### 2.2 Capture - Échec du job Policy Check (Conftest)
+
+![Échec Conftest](assets/github-action-error-conftest.png)
+
+### 2.3 Capture - Échec du job Scan Filesystem (Trivy)
+
+![Échec Trivy filesystem](assets/github-action-error-trivy.jpg)
 
 ## 3. Architecture du projet
 
 Le projet repose sur une petite API Flask avec :
+
 - un fichier `app.py` ;
 - un fichier `requirements.txt` ;
 - un `Dockerfile` ;
@@ -32,6 +39,7 @@ Le projet repose sur une petite API Flask avec :
 - un pipeline GitHub Actions dans `.github/workflows/ci.yml`.
 
 Le pipeline exécute plusieurs étapes automatisées :
+
 - lint YAML avec `yamllint` ;
 - contrôle de politique de sécurité avec `Conftest` ;
 - scan filesystem avec `Trivy fs` ;
@@ -41,6 +49,7 @@ Le pipeline exécute plusieurs étapes automatisées :
 ## 4. Outils utilisés
 
 Les principaux outils utilisés dans ce projet sont :
+
 - **GitHub Actions** pour le pipeline CI ;
 - **Flask** pour l’application de démonstration ;
 - **Docker** pour la conteneurisation ;
@@ -53,14 +62,21 @@ Les principaux outils utilisés dans ce projet sont :
 
 Le fichier principal du pipeline est : `.github/workflows/ci.yml`
 
-Le workflow automatise les étapes suivantes :
-1. récupération du dépôt ;
-2. installation de Python ;
-3. installation et exécution de `yamllint` ;
-4. installation et exécution de `Conftest` ;
-5. installation et exécution de `Trivy fs` ;
-6. build de l’image Docker ;
-7. exécution de `Trivy image`.
+Le workflow est structuré en **5 jobs distincts** avec des dépendances explicites entre eux :
+
+```
+lint
+ ├── policy          (needs: lint)
+ └── scan-filesystem (needs: lint)
+      └── build      (needs: policy + scan-filesystem)
+           └── scan-image (needs: build)
+```
+
+Cette organisation permet :
+
+- d'exécuter `policy` et `scan-filesystem` **en parallèle** après `lint` ;
+- de bloquer le `build` si l'un des deux contrôles de sécurité échoue ;
+- d'avoir un rendu visuel clair dans l'interface GitHub Actions.
 
 Extrait représentatif du workflow :
 
@@ -75,38 +91,79 @@ on:
   pull_request:
 
 jobs:
-  security-pipeline:
+  lint:
+    name: Lint YAML
     runs-on: ubuntu-latest
+
+  policy:
+    name: Policy Check (Conftest)
+    runs-on: ubuntu-latest
+    needs: lint
+
+  scan-filesystem:
+    name: Scan Filesystem (Trivy)
+    runs-on: ubuntu-latest
+    needs: lint
+
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: [policy, scan-filesystem]
+
+  scan-image:
+    name: Scan Docker Image (Trivy)
+    runs-on: ubuntu-latest
+    needs: build
 ```
 
-Ce pipeline permet d’intégrer la sécurité directement dans la CI, au lieu de la traiter uniquement à la fin du cycle de développement.
+Ce pipeline permet d'intégrer la sécurité directement dans la CI, au lieu de la traiter uniquement à la fin du cycle de développement.
 
-## 6. Résultats du premier scan
+## 6. Résultats du premier run CI
 
-Lors des premiers scans, plusieurs problèmes ont été détectés.
+Lors du premier run du pipeline avec la configuration initiale, plusieurs contrôles ont échoué. Les jobs `Build Docker Image` et `Scan Docker Image` ont été annulés en cascade.
 
-### 6.1 Dépendances
-Le scan Trivy a détecté une vulnérabilité sur la dépendance Flask utilisée dans `requirements.txt`.  
-La version `Flask 3.0.3` présentait une vulnérabilité corrigée dans une version plus récente.
+### 6.1 Job Lint YAML — Passé
 
-### 6.2 Dockerfile
-Le `Dockerfile` initial présentait des mauvaises configurations :
-- absence d’utilisateur non-root ;
-- absence de `HEALTHCHECK`.
+Le job `Lint YAML` a passé correctement. Le fichier `k8s/deployment.yaml` est syntaxiquement valide.
 
-### 6.3 Kubernetes
-Le manifeste Kubernetes présentait plusieurs faiblesses de configuration, notamment :
-- manque de paramètres complets dans le `securityContext` ;
-- absence de `allowPrivilegeEscalation: false` ;
-- absence de `readOnlyRootFilesystem: true` ;
-- absence de `capabilities.drop` ;
-- absence de `seccompProfile` ;
-- absence de limites et requêtes de ressources ;
-- utilisation implicite du namespace par défaut.
+### 6.2 Job Policy Check (Conftest) — Échoué
 
-### 6.4 Image Docker
-Le scan de l’image Docker a également remonté un nombre important de vulnérabilités système dans l’image de base Debian.  
-Cela montre qu’une partie des vulnérabilités ne vient pas directement du code applicatif, mais aussi de la base système utilisée pour construire l’image.
+Conftest a détecté que le conteneur ne définit pas `securityContext.runAsNonRoot` :
+
+```
+FAIL - k8s/deployment.yaml - main - Container 'devsecops-demo' must set securityContext.runAsNonRoot to true
+
+2 tests, 1 passed, 0 warnings, 1 failure, 0 exceptions
+Error: Process completed with exit code 1.
+```
+
+### 6.3 Job Scan Filesystem (Trivy) — Échoué
+
+Trivy a détecté **4 mauvaises configurations HIGH** réparties dans deux fichiers.
+
+| Fichier               | Type       | Mauvaises configurations |
+| --------------------- | ---------- | ------------------------ |
+| `requirements.txt`    | pip        | — (non scanné misconfig) |
+| `Dockerfile`          | dockerfile | 1                        |
+| `k8s/deployment.yaml` | kubernetes | 3                        |
+
+**Dockerfile — 1 HIGH :**
+
+- `DS-0002` : aucune instruction `USER` avec un utilisateur non-root ; le conteneur s'exécute en root.
+
+**k8s/deployment.yaml — 3 HIGH :**
+
+- `KSV-0014` : `securityContext.readOnlyRootFilesystem` non défini sur le conteneur.
+- `KSV-0118` : le conteneur utilise le contexte de sécurité par défaut (namespace `default`).
+- `KSV-0118` : le déploiement utilise le contexte de sécurité par défaut, autorisant les privilèges root.
+
+### 6.4 Jobs Build et Scan Image — Annulés
+
+Les jobs `Build Docker Image` et `Scan Docker Image (Trivy)` ont été automatiquement annulés, car ils dépendent de jobs en échec (`policy` et `scan-filesystem`). Cela illustre le rôle bloquant du pipeline : une configuration insuffisante empêche la construction et la diffusion de l'image.
+
+### 6.5 Dépendances applicatives
+
+La version `Flask 3.0.3` présente une vulnérabilité connue (`CVE-2026-27205`) corrigée en `3.1.3`. Cette vulnérabilité est visible dans le scan Trivy une fois le build débloqué.
 
 ## 7. Scan Trivy
 
@@ -115,69 +172,57 @@ Trivy a été utilisé à deux niveaux :
 - `Trivy fs` pour analyser les dépendances et les fichiers du projet ;
 - `Trivy image` pour analyser l’image Docker construite dans le pipeline.
 
-### 7.1 Résultats avant correction
+### 7.1 Résultats avant correction (run initial CI)
 
-Avant correction :
+Lors du premier run CI avec la configuration de base :
 
-- `requirements.txt` contenait 1 vulnérabilité détectée par Trivy ;
-- le `Dockerfile` présentait 2 mauvaises configurations ;
-- le manifeste `k8s/deployment.yaml` présentait 15 mauvaises configurations.
+| Fichier               | Problème détecté                                                     |
+| --------------------- | -------------------------------------------------------------------- |
+| `requirements.txt`    | 1 vulnérabilité (`Flask 3.0.3` — CVE-2026-27205)                     |
+| `Dockerfile`          | 1 mauvaise configuration HIGH (pas d'utilisateur non-root — DS-0002) |
+| `k8s/deployment.yaml` | 3 mauvaises configurations HIGH (KSV-0014, KSV-0118 ×2)              |
+
+La capture ci-dessous montre le job Trivy en échec avec le détail des findings :
+
+![Trivy filesystem scan avant correction](assets/github-action-error-trivy.jpg)
 
 ### 7.2 Résultats après correction
 
-Après correction :
+Après application des corrections :
 
-- `requirements.txt` ne remonte plus de vulnérabilité ;
+- `requirements.txt` ne remonte plus de vulnérabilité (`Flask` mis à jour en `3.1.3`) ;
 - le `Dockerfile` ne remonte plus de mauvaise configuration ;
 - le manifeste Kubernetes ne remonte plus de mauvaise configuration.
 
 Les vulnérabilités restantes concernent surtout :
 
-- l’image de base système ;
-- certains paquets présents dans l’environnement Python de l’image.
+- l'image de base système (`python:3.11-slim` / Debian) ;
+- certains paquets présents dans l'environnement Python de l'image (`pip`, `wheel`, `jaraco.context`).
 
 ### 7.3 Interprétation
 
-Les résultats montrent que les corrections appliquées ont permis d’éliminer les problèmes de configuration et la vulnérabilité applicative initiale.
+Les résultats montrent que les corrections appliquées ont permis d'éliminer les problèmes de configuration et la vulnérabilité applicative initiale.
 
-En revanche, le scan d’image montre qu’il reste des vulnérabilités système, ce qui met en évidence l’importance du choix et de la maintenance de l’image de base.
+En revanche, le scan d'image montre qu'il reste des vulnérabilités système, ce qui met en évidence l'importance du choix et de la maintenance de l'image de base.
 
-### 7.4 Capture - Résultats `Trivy filesystem scan` avant correction
+### 7.4 Capture - Résultats `Trivy filesystem scan` après correction
 
-La capture ci-dessous montre le résumé du scan `Trivy fs` avant correction.  
-On observe :
-- 1 vulnérabilité sur `requirements.txt` ;
-- 2 mauvaises configurations sur le `Dockerfile` ;
-- 15 mauvaises configurations sur `k8s/deployment.yaml`.
-
-![Trivy filesystem scan avant correction](assets/trivy-fs-before.png)
-
-### 7.5 Capture - Résultats `Trivy filesystem scan` après correction
-
-La capture ci-dessous montre le résumé du scan `Trivy fs` après correction.  
+La capture ci-dessous montre le résumé du scan `Trivy fs` après correction.
 Les résultats indiquent que :
+
 - `requirements.txt` ne remonte plus de vulnérabilité ;
 - le `Dockerfile` ne remonte plus de mauvaise configuration ;
 - le manifeste Kubernetes ne remonte plus de mauvaise configuration.
 
 ![Trivy filesystem scan après correction](assets/trivy-fs-after.png)
 
-### 7.6 Capture - Trivy image scan avant correction
+### 7.5 Capture - Trivy image scan après correction
 
-La capture ci-dessous montre le résumé du scan `Trivy image` avant correction.  
-On y observe :
-- de nombreuses vulnérabilités dans l’image de base Debian ;
-- une vulnérabilité encore présente sur la dépendance `Flask 3.0.3` embarquée dans l’image ;
-- d’autres composants Python sans vulnérabilité signalée à ce stade.
-
-![Trivy image scan avant correction](assets/trivy-image-before.png)
-
-### 7.7 Capture — Trivy image scan après correction
-
-La capture ci-dessous montre le résumé du scan `Trivy image` après correction.  
+La capture ci-dessous montre le résumé du scan `Trivy image` après correction.
 On constate que :
+
 - `Flask 3.1.3` ne remonte plus de vulnérabilité ;
-- les vulnérabilités restantes concernent principalement l’image de base Debian et certains paquets système ou outils intégrés à l’environnement Python.
+- les vulnérabilités restantes concernent principalement l'image de base Debian et certains paquets système ou outils intégrés à l'environnement Python.
 
 ![Trivy image scan après correction](assets/trivy-image-after.png)
 
@@ -198,20 +243,24 @@ deny contains msg if {
 }
 ```
 
-Cette règle a d’abord permis de faire échouer le contrôle sur un manifeste insuffisamment sécurisé, puis de valider la correction après ajout du `securityContext`.
+Cette règle a d'abord permis de faire échouer le contrôle sur un manifeste insuffisamment sécurisé, puis de valider la correction après ajout du `securityContext`.
 
-Le résultat final du contrôle est conforme, avec un passage réussi de la policy dans le pipeline.
+### 8.1 Sortie en échec — run initial (CI GitHub Actions)
 
-### 8.1 Sortie en échec avant correction
+Lors du premier run CI, le job `Policy Check (Conftest)` a échoué avec la sortie suivante :
 
-```bash
-./.local/bin/conftest test k8s/deployment.yaml --policy policy
+```
 FAIL - k8s/deployment.yaml - main - Container 'devsecops-demo' must set securityContext.runAsNonRoot to true
 
 2 tests, 1 passed, 0 warnings, 1 failure, 0 exceptions
+Error: Process completed with exit code 1.
 ```
 
-### 8.2 Sortie en succès après première correction
+La capture ci-dessous montre ce résultat directement dans l'interface GitHub Actions :
+
+![Échec Conftest dans GitHub Actions](assets/github-action-error-conftest.png)
+
+### 8.2 Sortie en succès après correction (locale)
 
 ```bash
 ./.local/bin/conftest test k8s/deployment.yaml --policy policy
@@ -219,7 +268,7 @@ FAIL - k8s/deployment.yaml - main - Container 'devsecops-demo' must set security
 2 tests, 2 passed, 0 warnings, 0 failures, 0 exceptions
 ```
 
-### 8.3 Sortie après durcissement plus complet
+### 8.3 Sortie après durcissement complet (locale)
 
 ```bash
 ./.local/bin/conftest test k8s/deployment.yaml --policy policy
@@ -232,13 +281,17 @@ FAIL - k8s/deployment.yaml - main - Container 'devsecops-demo' must set security
 Plusieurs corrections ont été apportées au projet afin d’améliorer la posture de sécurité.
 
 ### 9.1 Correction du Dockerfile
+
 Le `Dockerfile` a été durci en :
+
 - ajoutant un utilisateur non-root ;
 - ajoutant un `HEALTHCHECK` ;
 - ajustant les permissions sur le répertoire applicatif.
 
 ### 9.2 Correction du manifeste Kubernetes
+
 Le fichier `k8s/deployment.yaml` a été renforcé avec :
+
 - `runAsNonRoot: true` ;
 - `runAsUser` et `runAsGroup` ;
 - `allowPrivilegeEscalation: false` ;
@@ -249,6 +302,7 @@ Le fichier `k8s/deployment.yaml` a été renforcé avec :
 - un namespace dédié `devsecops`.
 
 ### 9.3 Mise à jour des dépendances
+
 La dépendance Flask a été mise à jour de `3.0.3` vers `3.1.3` afin de corriger la vulnérabilité détectée dans le scan des dépendances.
 
 ## 10. Analyse sécurité
@@ -259,6 +313,7 @@ Les corrections apportées ont ensuite permis de réduire fortement les problèm
 Cela illustre bien l’intérêt d’intégrer la sécurité le plus tôt possible dans le cycle de développement, avec des contrôles automatisés directement dans la CI.
 
 Le projet montre aussi qu’il existe plusieurs niveaux de sécurité :
+
 - la sécurité du code et des dépendances ;
 - la sécurité du conteneur ;
 - la sécurité du déploiement Kubernetes ;
@@ -269,6 +324,7 @@ Même si certaines vulnérabilités système restent présentes, le pipeline per
 ## 11. Recommandations
 
 Pour aller plus loin, plusieurs améliorations pourraient être envisagées :
+
 - utiliser une image de base encore plus minimale ou mieux maintenue ;
 - mettre en place un seuil bloquant sur certaines vulnérabilités critiques ;
 - générer un SBOM dans le pipeline ;
@@ -278,24 +334,23 @@ Pour aller plus loin, plusieurs améliorations pourraient être envisagées :
 
 ## 12. Synthèse des résultats
 
-Le projet montre une amélioration nette entre le premier état du pipeline et la version finale.
+Le projet montre une amélioration nette entre le premier run CI et la version finale corrigée.
 
-Avant correction :
-- `requirements.txt` contenait 1 vulnérabilité détectée par Trivy ;
-- le `Dockerfile` présentait 2 mauvaises configurations ;
-- le manifeste `k8s/deployment.yaml` présentait 15 mauvaises configurations.
+| Contrôle                       | Avant correction                         | Après correction                           |
+| ------------------------------ | ---------------------------------------- | ------------------------------------------ |
+| Lint YAML                      | Passé                                    | Passé                                      |
+| Conftest policy                | **Échoué** (runAsNonRoot manquant)       | Passé                                      |
+| Trivy FS — Dockerfile          | **1 HIGH** (pas d'utilisateur non-root)  | Passé                                      |
+| Trivy FS — k8s/deployment.yaml | **3 HIGH** (securityContext insuffisant) | Passé                                      |
+| Trivy FS — requirements.txt    | **1 vulnérabilité** (Flask 3.0.3)        | Passé                                      |
+| Build Docker Image             | **Annulé**                               | Passé                                      |
+| Scan Docker Image              | **Annulé**                               | Passé (vulnérabilités système résiduelles) |
 
-Après correction :
-- `requirements.txt` ne remonte plus de vulnérabilité ;
-- le `Dockerfile` ne remonte plus de mauvaise configuration ;
-- le manifeste Kubernetes ne remonte plus de mauvaise configuration ;
-- la policy Conftest passe correctement dans le pipeline.
-
-Cette évolution montre que les outils intégrés dans le pipeline n’ont pas seulement servi à détecter des problèmes, mais aussi à guider leur correction de manière progressive.
+Cette évolution montre que les outils intégrés dans le pipeline n'ont pas seulement servi à détecter des problèmes, mais aussi à guider leur correction de manière progressive. La structure multi-jobs a également permis de rendre visible le caractère bloquant de chaque contrôle de sécurité.
 
 ## 13. Conclusion
 
-Ce projet a permis de mettre en place un pipeline DevSecOps simple mais complet autour d’une application Flask.  
-Les outils intégrés dans GitHub Actions ont permis d’automatiser le lint, le contrôle de politique, le scan des dépendances, le scan de configuration et le scan d’image.  
-Les premiers résultats ont mis en évidence plusieurs faiblesses de sécurité, qui ont ensuite été corrigées progressivement.  
-Le résultat final montre une nette amélioration de la posture de sécurité du projet, avec un pipeline capable de détecter, contrôler et accompagner la remédiation de plusieurs types de risques.
+Ce projet a permis de mettre en place un pipeline DevSecOps structuré et complet autour d'une application Flask.  
+La mise en place d'un pipeline **multi-jobs** dans GitHub Actions offre une visibilité claire sur l'enchaînement des contrôles et le caractère bloquant de chaque étape de sécurité.  
+Le premier run CI a démontré concrètement l'utilité du pipeline : plusieurs problèmes réels ont été détectés et remontés automatiquement, forçant leur correction avant toute construction d'image.  
+Le résultat final montre une nette amélioration de la posture de sécurité du projet, avec un pipeline capable de détecter, contrôler et accompagner la remédiation de plusieurs types de risques : dépendances, configuration Docker, configuration Kubernetes et image finale.
