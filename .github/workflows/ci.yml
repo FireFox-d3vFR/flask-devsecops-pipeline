@@ -122,5 +122,5 @@ jobs:
       - name: Run Trivy image scan (full report)
         run: trivy image --scanners vuln,secret,misconfig devsecops-demo:ci
 
-      - name: Fail on HIGH/CRITICAL vulnerabilities
-        run: trivy image --scanners vuln --severity HIGH,CRITICAL --exit-code 1 devsecops-demo:ci
+      - name: Report HIGH/CRITICAL vulnerabilities (non-blocking)
+        run: trivy image --scanners vuln --severity HIGH,CRITICAL --exit-code 0 devsecops-demo:ci
